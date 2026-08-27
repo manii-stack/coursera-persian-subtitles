@@ -3,22 +3,23 @@
 /* =========================================================================
  * Coursera Persian Subtitles — service worker
  *
- * وظیفه‌ی این فایل:
- *   - گرفتن آرایه‌ی خطوط زیرنویس انگلیسی از content script
- *   - ترجمه‌ی دسته‌ای با Google AI (Gemini) و تحویل تدریجی نتیجه
- *   - نگهداری کش ترجمه در chrome.storage.local تا تماشای دوباره رایگان باشد
+ * What this file does:
+ *   - receives the array of English subtitle lines from the content script
+ *   - translates them in batches with Google AI (Gemini), delivering results as they arrive
+ *   - keeps a translation cache in chrome.storage.local so re-watching is free
  *
- * کلید API فقط در همین فایل خوانده می‌شود؛ content script هرگز آن را نمی‌بیند.
+ * The API key is read only here; the content script never sees it.
  * ========================================================================= */
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
-const BATCH_LINES = 40;        // هر درخواست چند خط زیرنویس
-const CONTEXT_LINES = 3;       // چند خط قبلی به‌عنوان زمینه (ترجمه نمی‌شود)
-const MAX_CACHE_ENTRIES = 600; // سقف تعداد دسته‌های کش‌شده
+const BATCH_LINES = 40;        // subtitle lines per request
+const CONTEXT_LINES = 3;       // preceding lines sent as context (never translated)
+const MAX_CACHE_ENTRIES = 600; // cap on the number of cached batches
 
-// دو گونه‌ی قاعده‌ی ۴ — کلید «اصطلاحات تخصصی» در popup بینشان جابه‌جا می‌کند.
-// هر گونه کلید کش جدا دارد، وگرنه عوض کردن کلید ترجمه‌ی قدیمی را برمی‌گرداند.
+// Two variants of rule 4 — the "technical terms" switch in the popup selects between them.
+// Each variant gets its own cache key, otherwise flipping the switch would return the old
+// translation straight from the cache and look like it had no effect.
 const TERMS_RULE = {
   keep: [
     '4. Do NOT translate technical, product or brand terms. Keep them in their original Latin',
@@ -58,7 +59,7 @@ function buildSystemPrompt(keepTerms) {
 
 /* ---------------------------------------------------------------- utils */
 
-// cyrb53 — هش ۵۳ بیتی سریع برای کلید کش
+// cyrb53 — fast 53-bit hash used for cache keys
 function hash(str) {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
   for (let i = 0; i < str.length; i++) {
@@ -146,7 +147,7 @@ async function callGemini(apiKey, model, lines, context, keepTerms) {
   );
 
   let data = null;
-  try { data = await res.json(); } catch (e) { /* بدنه‌ی غیر JSON */ }
+  try { data = await res.json(); } catch (e) { /* non-JSON body */ }
 
   if (!res.ok) {
     const err = new Error(describeError(res.status, data));
@@ -159,7 +160,7 @@ async function callGemini(apiKey, model, lines, context, keepTerms) {
   try {
     out = JSON.parse(raw);
   } catch (e) {
-    // گاهی مدل آرایه را داخل بلوک کد می‌گذارد
+    // the model sometimes wraps the array in a code block
     const m = raw.match(/\[[\s\S]*\]/);
     if (!m) throw new Error('پاسخ مدل قابل تجزیه نبود.');
     out = JSON.parse(m[0]);
@@ -168,7 +169,7 @@ async function callGemini(apiKey, model, lines, context, keepTerms) {
   return out.map((x) => (typeof x === 'string' ? x : String(x ?? '')));
 }
 
-// تراز کردن طول خروجی با ورودی: کم بود پر می‌کنیم، زیاد بود می‌بریم.
+// Align the output length with the input: pad when short, truncate when long.
 function align(out, lines) {
   if (out.length === lines.length) return out;
   const fixed = out.slice(0, lines.length);
@@ -188,7 +189,7 @@ async function translateBatch(apiKey, model, lines, context, keepTerms) {
     try {
       let out = await callGemini(apiKey, model, lines, context, keepTerms);
       if (out.length !== lines.length && attempt === 0) {
-        // یک بار دیگر با همان ورودی — معمولاً بار دوم تراز می‌شود
+        // one more attempt with the same input — the second usually aligns
         out = await callGemini(apiKey, model, lines, context, keepTerms);
       }
       const texts = align(out, lines);
@@ -196,7 +197,7 @@ async function translateBatch(apiKey, model, lines, context, keepTerms) {
       return { texts, cached: false };
     } catch (e) {
       lastErr = e;
-      // فقط خطاهای گذرا ارزش تلاش دوباره دارند
+      // only transient errors are worth retrying
       if (e.status === 429 || e.status === 500 || e.status === 503 || !e.status) {
         await sleep([2000, 6000, 15000][attempt]);
         continue;
@@ -241,7 +242,7 @@ async function runJob(port, msg, isCancelled) {
     batches.push({ from: i, lines: lines.slice(i, i + BATCH_LINES) });
   }
 
-  // از دسته‌ای شروع کن که پخش همان‌جاست، بعد جلو برو و در آخر به عقب برگرد
+  // Start with the batch being watched, move forward, then wrap around to the earlier ones
   const startB = Math.min(batches.length - 1, Math.max(0, Math.floor((msg.startIndex || 0) / BATCH_LINES)));
   const order = [];
   for (let k = 0; k < batches.length; k++) order.push(batches[(startB + k) % batches.length]);

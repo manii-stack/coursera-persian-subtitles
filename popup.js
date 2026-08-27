@@ -18,7 +18,7 @@ const FALLBACK_MODELS = [
   'gemini-2.0-flash'
 ];
 
-// دنباله‌ی مشترک هر انتخاب، تا اگر فونت نبود متن نشکند
+// Shared tail for every choice, so the text never breaks if the font is missing
 const FONT_TAIL = '"SF Pro Text", "Segoe UI", Tahoma, "Geeza Pro", sans-serif';
 
 const FONTS = [
@@ -37,8 +37,8 @@ const FONTS = [
 
 const stackFor = (probe) => (probe ? '"' + probe + '", ' + FONT_TAIL : '');
 
-// آیا فونت روی این دستگاه نصب است؟ عرض متن را با سه فونت پایه می‌سنجیم؛
-// اگر با هیچ‌کدام فرق نکرد یعنی مرورگر به همان پایه برگشته، پس نصب نیست.
+// Is the font installed on this machine? Measure the text width against three base
+// fonts; if it never differs, the browser fell back to the base, so the font is absent.
 function fontAvailable(name) {
   const sample = 'آزمایش فونت Wgi ۱۲۳';
   const ctx = document.createElement('canvas').getContext('2d');
@@ -84,7 +84,7 @@ function fillFonts(selectedStack) {
     if (f.probe) o.style.fontFamily = stackFor(f.probe);
     sel.appendChild(o);
   }
-  // اگر انتخاب ذخیره‌شده دیگر در دسترس نیست، به پیش‌فرض برگرد
+  // if the saved choice is no longer available, fall back to the default
   sel.value = selectedStack || '';
   if (sel.selectedIndex < 0 || sel.options[sel.selectedIndex].disabled) sel.value = '';
   $('fontHint').textContent = missing
@@ -109,7 +109,7 @@ async function load() {
   });
 }
 
-// تغییرات فوری — بدون نیاز به دکمه‌ی ذخیره
+// Instant changes — no save button needed
 $('fontFamily').addEventListener('change', () =>
   chrome.storage.local.set({ fontStack: $('fontFamily').value }));
 

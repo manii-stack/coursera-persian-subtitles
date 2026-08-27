@@ -3,9 +3,9 @@
 /* =========================================================================
  * Coursera Persian Subtitles — content script
  *
- * منبع متن: خودِ تراک زیرنویس انگلیسیِ Coursera روی عنصر <video>
- * (video.textTracks). با mode='hidden' کیوها با تایمینگ دقیق لود می‌شوند
- * بدون اینکه مرورگر آن‌ها را رسم کند؛ ما خودمان روی ویدیو رسم می‌کنیم.
+ * Text source: Coursera's own English caption track on the <video> element
+ * (video.textTracks). With mode='hidden' the cues load with their exact timings
+ * without the browser drawing them; we draw them over the video ourselves.
  * ========================================================================= */
 
 (() => {
@@ -18,19 +18,19 @@
     showEnglish: true,
     fontSize: 26,
     bottomOffset: 72,
-    fontStack: '',            // خالی یعنی همان چیدمان پیش‌فرض overlay.css
+    fontStack: '',            // empty means the default stack from overlay.css
     model: 'gemini-3.5-flash-lite'
   };
 
   let S = Object.assign({}, DEFAULTS);
-  let st = null;          // وضعیت اتصال فعلی به یک ویدیو
+  let st = null;          // state of the current attachment to one video
   let watchdog = null;
 
   /* ------------------------------------------------------------- helpers */
 
   const log = (...a) => console.debug(TAG, ...a);
 
-  // پاک‌سازی متن VTT: حذف تگ‌ها و رمزگشایی موجودیت‌ها
+  // Clean VTT text: strip tags and decode entities
   const DECODER = document.createElement('textarea');
   function cleanCue(text) {
     let t = String(text || '').replace(/<[^>]*>/g, '');
@@ -41,7 +41,7 @@
     return t.replace(/\r/g, '').trim();
   }
 
-  // متنی که برای ترجمه می‌فرستیم: تک‌خطی
+  // The form we send for translation: a single line
   const flat = (t) => t.replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 
   function cueIndexAt(cues, t) {
@@ -73,7 +73,7 @@
       (t.kind === 'captions' || t.kind === 'subtitles')
     );
     if (!en.length) return null;
-    // تراکی که کیو دارد را ترجیح بده
+    // prefer a track that already carries cues
     return en.find((t) => t.cues && t.cues.length) || en[0];
   }
 
@@ -122,7 +122,7 @@
     st.ui.en.style.display = S.showEnglish ? '' : 'none';
   }
 
-  // در حالت تمام‌صفحه اگر پوشش بیرون از عنصر تمام‌صفحه بماند دیده نمی‌شود
+  // In fullscreen an overlay left outside the fullscreen element is invisible
   function onFullscreenChange() {
     if (!st || !st.ui) return;
     const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
@@ -164,7 +164,7 @@
     st.ui.box.style.visibility = 'visible';
     st.ui.fa.textContent = fa || '';
     st.ui.fa.style.opacity = fa ? '1' : '0';
-    // تا وقتی ترجمه نرسیده، انگلیسی را نگه می‌داریم تا صفحه خالی نماند
+    // until the translation arrives, keep the English so the area is not blank
     st.ui.en.textContent = (S.showEnglish || !fa) ? cue.en : '';
     st.ui.en.style.display = (S.showEnglish || !fa) ? '' : 'none';
   }
@@ -202,7 +202,7 @@
           const idx = m.from + k;
           if (idx < st.fa.length && m.texts[k]) st.fa[idx] = m.texts[k];
         }
-        st.lastIndex = -2;   // رندر را مجبور کن دوباره متن را بردارد
+        st.lastIndex = -2;   // force render() to pick the text up again
         render();
         setChip(m.done >= m.total ? '' : 'در حال ترجمه… ' + faNum(m.done) + '/' + faNum(m.total), null);
       } else if (m.type === 'done') {
@@ -222,7 +222,7 @@
       if (!st || st.token !== myVideoToken) return;
       if (st.port !== port) return;
       st.port = null;
-      // service worker خوابیده؛ از اولین دسته‌ی ترجمه‌نشده ادامه بده
+      // the service worker went to sleep; resume from the first untranslated batch
       const stillMissing = st.fa.some((x, i) => !x && st.cues[i].flat);
       if (stillMissing && st.reconnects < 5) {
         st.reconnects++;
@@ -237,7 +237,7 @@
     });
   }
 
-  // عدد فارسی برای نمایش
+  // Persian digits for display
   const FA_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
   const faNum = (n) => String(n).replace(/\d/g, (d) => FA_DIGITS[+d]);
 
@@ -256,7 +256,7 @@
     st = null;
   }
 
-  // retries فقط برای تلاش دوباره‌ی برداشت کیو است؛ ویدیوی جدید آن را صفر می‌کند.
+  // retries only guards the cue-harvest retry; a new video resets it to zero.
   async function attach(video, retries) {
     detach();
     const token = ++tokenSeq;
@@ -281,7 +281,7 @@
 
     st.track = track;
     st.savedMode = track.mode;
-    // 'showing' یعنی خودِ Coursera دارد زیرنویس را رسم می‌کند — دوتایی نشود
+    // 'showing' means Coursera is drawing the captions itself — avoid doubling them
     if (track.mode !== 'hidden') track.mode = 'hidden';
 
     const cues = await waitForCues(track, token);
@@ -313,7 +313,7 @@
     ro.observe(video);
     st.offs.push(() => ro.disconnect());
 
-    // پلیر Coursera گاهی مود تراک را به disabled برمی‌گرداند و cues تهی می‌شود
+    // the Coursera player sometimes flips the track back to disabled, emptying cues
     const keepHidden = () => { if (st && st.track && st.track.mode !== 'hidden') st.track.mode = 'hidden'; };
     try {
       video.textTracks.addEventListener('change', keepHidden);
@@ -374,17 +374,17 @@
       return;
     }
     const src = v.currentSrc || '';
-    if (st && st.video === v && !st.srcKey && src) st.srcKey = src;   // src دیر پر شده، نه ویدیوی جدید
+    if (st && st.video === v && !st.srcKey && src) st.srcKey = src;   // src filled in late, not a new video
 
     if (!st || st.video !== v || st.path !== location.pathname ||
         (st.srcKey && src && st.srcKey !== src)) {
       attach(v);
     } else if (st.ui && !st.ui.root.isConnected) {
-      // React پوشش را دور انداخته — دوباره بساز
+      // React threw the overlay away — rebuild it
       attach(v);
     } else {
       if (st.track && st.track.mode !== 'hidden') st.track.mode = 'hidden';
-      // اگر کیوها نیامدند (تراک وسط کار disabled شده بود) دوباره تلاش کن
+      // if the cues never arrived (the track was disabled mid-flight), try again
       if (st.track && !st.cues.length && st.retries < 3 && st.track.cues && st.track.cues.length) {
         attach(v, st.retries + 1);
       }
@@ -410,7 +410,7 @@
         S[k] = changes[k].newValue; restyle = true;
       } else if (k === 'model' || k === 'apiKey' || k === 'keepTerms') {
         if (k === 'model') S.model = changes[k].newValue;
-        retranslate = true;   // ترجمه‌ی کش‌شده با تنظیم قبلی دیگر معتبر نیست
+        retranslate = true;   // translation cached under the previous setting no longer applies
       }
     }
     if (toggled) { check(); return; }
