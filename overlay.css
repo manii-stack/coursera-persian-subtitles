@@ -1,0 +1,70 @@
+/* پوشش زیرنویس فارسی روی پلیر Coursera */
+
+.cfsub-root {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 72px;
+  z-index: 2147483000;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4%;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.cfsub-box {
+  max-width: 92%;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.cfsub-fa {
+  direction: rtl;
+  font-family: "Vazirmatn", "IRANSans", "IRANYekan", "SF Pro Text",
+               "Segoe UI", Tahoma, "Geeza Pro", sans-serif;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.75;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+  transition: opacity 120ms linear;
+}
+
+.cfsub-en {
+  direction: ltr;
+  font-family: "SF Pro Text", "Segoe UI", Arial, sans-serif;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.78);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+  white-space: pre-line;
+}
+
+.cfsub-chip {
+  align-self: flex-end;
+  direction: rtl;
+  font-family: "Vazirmatn", "IRANSans", "IRANYekan", "SF Pro Text",
+               "Segoe UI", Tahoma, "Geeza Pro", sans-serif;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 86, 210, 0.85);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.cfsub-chip--warn { background: rgba(176, 118, 0, 0.9); }
+.cfsub-chip--err  { background: rgba(178, 34, 34, 0.92); }

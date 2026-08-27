@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>زیرنویس فارسی Coursera</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    width: 340px; margin: 0; padding: 14px 16px 16px;
+    font-family: "Vazirmatn", "IRANSans", "IRANYekan", "SF Pro Text",
+               "Segoe UI", Tahoma, "Geeza Pro", sans-serif;
+    font-size: 13px; background: #fff; color: #16181d;
+  }
+  h1 { font-size: 14px; margin: 0 0 12px; font-weight: 700; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0; }
+  label { font-weight: 500; }
+  .hint { font-size: 11px; color: #6a7180; line-height: 1.7; margin: 4px 0 0; }
+  input[type=password], input[type=text], select {
+    width: 100%; box-sizing: border-box; padding: 7px 9px; font-size: 12px;
+    border: 1px solid #ccd0d8; border-radius: 7px; background: #fff; color: inherit;
+    font-family: inherit; direction: ltr; text-align: left;
+  }
+  select { direction: rtl; text-align: right; }
+  input[type=range] { width: 150px; }
+  button {
+    font-family: inherit; font-size: 12px; padding: 7px 12px; border-radius: 7px;
+    border: 1px solid #ccd0d8; background: #f4f5f7; color: inherit; cursor: pointer;
+  }
+  button.primary { background: #0056d2; border-color: #0056d2; color: #fff; font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .btns { display: flex; gap: 8px; margin-top: 8px; }
+  hr { border: 0; border-top: 1px solid #e6e8ec; margin: 14px 0; }
+  #status { min-height: 16px; font-size: 11.5px; line-height: 1.7; margin-top: 8px; }
+  .ok { color: #1a7f37; } .err { color: #b42318; }
+  a { color: #0056d2; }
+  .sw { position: relative; width: 40px; height: 22px; flex: none; }
+  .sw input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sw span {
+    position: absolute; inset: 0; border-radius: 999px; background: #c8ccd4;
+    transition: background .15s; pointer-events: none;
+  }
+  .sw span::after {
+    content: ""; position: absolute; top: 3px; right: 3px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: transform .15s;
+  }
+  .sw input:checked + span { background: #0056d2; }
+  .sw input:checked + span::after { transform: translateX(-18px); }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1e2027; color: #e7e9ee; }
+    input, select { background: #2a2d36; border-color: #3a3e49; }
+    button { background: #2a2d36; border-color: #3a3e49; }
+    .hint { color: #9aa1b1; }
+    hr { border-top-color: #333744; }
+  }
+</style>
+</head>
+<body>
+  <h1>زیرنویس فارسی Coursera</h1>
+
+  <div class="row">
+    <label for="enabled">فعال</label>
+    <span class="sw"><input type="checkbox" id="enabled"><span></span></span>
+  </div>
+
+  <div class="row">
+    <label for="showEnglish">نمایش متن انگلیسی زیر فارسی</label>
+    <span class="sw"><input type="checkbox" id="showEnglish"><span></span></span>
+  </div>
+
+  <div class="row">
+    <label for="fontSize">اندازه‌ی قلم</label>
+    <input type="range" id="fontSize" min="16" max="46" step="1">
+  </div>
+
+  <div class="row">
+    <label for="bottomOffset">فاصله از پایین</label>
+    <input type="range" id="bottomOffset" min="10" max="200" step="2">
+  </div>
+
+  <hr>
+
+  <label for="apiKey">کلید Google AI</label>
+  <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off" spellcheck="false">
+  <p class="hint">
+    کلید رایگان را از <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com/apikey</a>
+    بگیرید. کلید فقط روی همین مرورگر ذخیره می‌شود و مستقیم به Google فرستاده می‌شود.
+  </p>
+
+  <div class="row" style="margin-top:12px">
+    <label for="model">مدل</label>
+    <select id="model" style="width:170px"></select>
+  </div>
+
+  <div class="btns">
+    <button class="primary" id="save">ذخیره</button>
+    <button id="test">آزمایش کلید</button>
+    <button id="refresh">مدل‌ها</button>
+  </div>
+
+  <div id="status"></div>
+
+  <hr>
+  <div class="row">
+    <span class="hint" id="cacheInfo">کش ترجمه</span>
+    <button id="clear">پاک کردن کش</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

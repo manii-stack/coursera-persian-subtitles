@@ -1,0 +1,321 @@
+'use strict';
+
+/* =========================================================================
+ * Coursera Persian Subtitles — service worker
+ *
+ * وظیفه‌ی این فایل:
+ *   - گرفتن آرایه‌ی خطوط زیرنویس انگلیسی از content script
+ *   - ترجمه‌ی دسته‌ای با Google AI (Gemini) و تحویل تدریجی نتیجه
+ *   - نگهداری کش ترجمه در chrome.storage.local تا تماشای دوباره رایگان باشد
+ *
+ * کلید API فقط در همین فایل خوانده می‌شود؛ content script هرگز آن را نمی‌بیند.
+ * ========================================================================= */
+
+const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+const DEFAULT_MODEL = 'gemini-2.5-flash';
+const BATCH_LINES = 40;        // هر درخواست چند خط زیرنویس
+const CONTEXT_LINES = 3;       // چند خط قبلی به‌عنوان زمینه (ترجمه نمی‌شود)
+const MAX_CACHE_ENTRIES = 600; // سقف تعداد دسته‌های کش‌شده
+
+const SYSTEM_PROMPT = [
+  'You translate English subtitle lines from online course videos into natural, fluent Persian (Farsi).',
+  '',
+  'Input: a JSON object with "context" (previous English lines, for continuity only) and "lines"',
+  '(a JSON array of English subtitle lines to translate, in order).',
+  'Output: a JSON array of Persian strings.',
+  '',
+  'Hard rules:',
+  '1. The output array MUST contain exactly one element per element of "lines", in the same order.',
+  '   Never merge, split, drop, reorder or add lines. Never translate the "context" lines.',
+  '2. Each line is a subtitle fragment and a sentence usually continues across several lines.',
+  '   Translate so the lines read correctly when played in sequence, but keep the fragment boundaries.',
+  '3. Use natural spoken Persian, not word-by-word translation. Use the ZWNJ correctly (می‌شود، می‌کنیم).',
+  '4. Technical and product terms: use the form Persian speakers actually use — either the standard',
+  '   Persian term (AI → هوش مصنوعی) or the Latin original when that is what people say',
+  '   (prompt → پرامپت، Google Workspace → Google Workspace، Gemini → Gemini).',
+  '5. Keep numbers, URLs, file names and code identifiers unchanged.',
+  '6. A line that is only a marker such as "[MUSIC]" or "- " becomes a short Persian equivalent',
+  '   (for example «[موسیقی]») or an empty string.',
+  '7. Plain text only: no numbering, no surrounding quotes, no notes, no explanations.'
+].join('\n');
+
+/* ---------------------------------------------------------------- utils */
+
+// cyrb53 — هش ۵۳ بیتی سریع برای کلید کش
+function hash(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function safePost(port, msg) {
+  try { port.postMessage(msg); return true; } catch (e) { return false; }
+}
+
+/* ---------------------------------------------------------------- cache */
+
+async function cacheGet(key) {
+  const got = await chrome.storage.local.get(key);
+  return got[key] || null;
+}
+
+async function cacheSet(key, texts) {
+  await chrome.storage.local.set({ [key]: { texts, ts: Date.now() } });
+  pruneCache().catch(() => {});
+}
+
+let pruning = false;
+async function pruneCache() {
+  if (pruning) return;
+  pruning = true;
+  try {
+    const all = await chrome.storage.local.get(null);
+    const keys = Object.keys(all).filter((k) => k.startsWith('tb:'));
+    if (keys.length <= MAX_CACHE_ENTRIES) return;
+    keys.sort((a, b) => (all[a].ts || 0) - (all[b].ts || 0));
+    await chrome.storage.local.remove(keys.slice(0, keys.length - MAX_CACHE_ENTRIES));
+  } finally {
+    pruning = false;
+  }
+}
+
+/* ------------------------------------------------------------ Gemini API */
+
+function extractText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts.map((p) => p.text || '').join('');
+}
+
+function describeError(status, data) {
+  const m = data?.error?.message;
+  if (m) return m;
+  if (status === 400) return 'درخواست نامعتبر (کلید API یا نام مدل را بررسی کنید).';
+  if (status === 403) return 'دسترسی رد شد — کلید API معتبر نیست یا فعال نشده است.';
+  if (status === 404) return 'این مدل در دسترس کلید شما نیست.';
+  if (status === 429) return 'محدودیت نرخ Google AI (سهمیه‌ی رایگان). کمی بعد دوباره تلاش کنید.';
+  return 'خطای HTTP ' + status;
+}
+
+async function callGemini(apiKey, model, lines, context) {
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{
+      role: 'user',
+      parts: [{ text: JSON.stringify({ context, lines }) }]
+    }],
+    generationConfig: {
+      temperature: 0.3,
+      responseMimeType: 'application/json',
+      responseSchema: { type: 'ARRAY', items: { type: 'STRING' } }
+    }
+  };
+
+  const res = await fetch(
+    API_BASE + '/models/' + encodeURIComponent(model) + ':generateContent',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify(body)
+    }
+  );
+
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* بدنه‌ی غیر JSON */ }
+
+  if (!res.ok) {
+    const err = new Error(describeError(res.status, data));
+    err.status = res.status;
+    throw err;
+  }
+
+  const raw = extractText(data);
+  let out;
+  try {
+    out = JSON.parse(raw);
+  } catch (e) {
+    // گاهی مدل آرایه را داخل بلوک کد می‌گذارد
+    const m = raw.match(/\[[\s\S]*\]/);
+    if (!m) throw new Error('پاسخ مدل قابل تجزیه نبود.');
+    out = JSON.parse(m[0]);
+  }
+  if (!Array.isArray(out)) throw new Error('پاسخ مدل آرایه نبود.');
+  return out.map((x) => (typeof x === 'string' ? x : String(x ?? '')));
+}
+
+// تراز کردن طول خروجی با ورودی: کم بود پر می‌کنیم، زیاد بود می‌بریم.
+function align(out, lines) {
+  if (out.length === lines.length) return out;
+  const fixed = out.slice(0, lines.length);
+  while (fixed.length < lines.length) fixed.push('');
+  return fixed;
+}
+
+async function translateBatch(apiKey, model, lines, context) {
+  const key = 'tb:' + model + ':' + hash(JSON.stringify(lines));
+  const hit = await cacheGet(key);
+  if (hit && Array.isArray(hit.texts) && hit.texts.length === lines.length) {
+    return { texts: hit.texts, cached: true };
+  }
+
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      let out = await callGemini(apiKey, model, lines, context);
+      if (out.length !== lines.length && attempt === 0) {
+        // یک بار دیگر با همان ورودی — معمولاً بار دوم تراز می‌شود
+        out = await callGemini(apiKey, model, lines, context);
+      }
+      const texts = align(out, lines);
+      await cacheSet(key, texts);
+      return { texts, cached: false };
+    } catch (e) {
+      lastErr = e;
+      // فقط خطاهای گذرا ارزش تلاش دوباره دارند
+      if (e.status === 429 || e.status === 500 || e.status === 503 || !e.status) {
+        await sleep([2000, 6000, 15000][attempt]);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error('ترجمه ناموفق بود.');
+}
+
+/* ------------------------------------------------------------ port jobs */
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'coursera-fa-sub') return;
+
+  let cancelled = false;
+  port.onDisconnect.addListener(() => { cancelled = true; });
+
+  port.onMessage.addListener((msg) => {
+    if (msg && msg.type === 'translate') {
+      runJob(port, msg, () => cancelled).catch((e) => {
+        safePost(port, { type: 'error', code: 'internal', message: String(e && e.message || e) });
+      });
+    }
+  });
+});
+
+async function runJob(port, msg, isCancelled) {
+  const lines = Array.isArray(msg.lines) ? msg.lines : [];
+  if (!lines.length) { safePost(port, { type: 'done', total: 0 }); return; }
+
+  const cfg = await chrome.storage.local.get(['apiKey', 'model']);
+  const model = cfg.model || DEFAULT_MODEL;
+  if (!cfg.apiKey) {
+    safePost(port, { type: 'error', code: 'nokey', message: 'کلید Google AI تنظیم نشده است.' });
+    return;
+  }
+
+  const batches = [];
+  for (let i = 0; i < lines.length; i += BATCH_LINES) {
+    batches.push({ from: i, lines: lines.slice(i, i + BATCH_LINES) });
+  }
+
+  // از دسته‌ای شروع کن که پخش همان‌جاست، بعد جلو برو و در آخر به عقب برگرد
+  const startB = Math.min(batches.length - 1, Math.max(0, Math.floor((msg.startIndex || 0) / BATCH_LINES)));
+  const order = [];
+  for (let k = 0; k < batches.length; k++) order.push(batches[(startB + k) % batches.length]);
+
+  safePost(port, { type: 'start', total: batches.length });
+
+  let done = 0;
+  for (const b of order) {
+    if (isCancelled()) return;
+    const context = lines.slice(Math.max(0, b.from - CONTEXT_LINES), b.from);
+    try {
+      const { texts, cached } = await translateBatch(cfg.apiKey, model, b.lines, context);
+      if (isCancelled()) return;
+      done++;
+      if (!safePost(port, { type: 'batch', from: b.from, texts, done, total: batches.length, cached })) return;
+    } catch (e) {
+      safePost(port, {
+        type: 'error',
+        code: e.status === 429 ? 'rate' : 'api',
+        message: String(e && e.message || e),
+        done,
+        total: batches.length
+      });
+      return;
+    }
+  }
+  safePost(port, { type: 'done', total: batches.length });
+}
+
+/* --------------------------------------------------------- popup helpers */
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.type) return;
+
+  if (msg.type === 'listModels') {
+    (async () => {
+      const cfg = await chrome.storage.local.get(['apiKey']);
+      if (!cfg.apiKey) return sendResponse({ ok: false, error: 'ابتدا کلید API را ذخیره کنید.' });
+      try {
+        const res = await fetch(API_BASE + '/models?pageSize=200', {
+          headers: { 'x-goog-api-key': cfg.apiKey }
+        });
+        const data = await res.json();
+        if (!res.ok) return sendResponse({ ok: false, error: describeError(res.status, data) });
+        const models = (data.models || [])
+          .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+          .map((m) => String(m.name || '').replace(/^models\//, ''))
+          .filter((n) => /gemini/i.test(n) && !/embedding|aqa|vision/i.test(n))
+          .sort();
+        sendResponse({ ok: true, models });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e && e.message || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'testKey') {
+    (async () => {
+      const cfg = await chrome.storage.local.get(['apiKey', 'model']);
+      if (!cfg.apiKey) return sendResponse({ ok: false, error: 'ابتدا کلید API را ذخیره کنید.' });
+      try {
+        const out = await callGemini(
+          cfg.apiKey,
+          cfg.model || DEFAULT_MODEL,
+          ['Hello and welcome to this course.'],
+          []
+        );
+        sendResponse({ ok: true, sample: out[0] || '' });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e && e.message || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'clearCache') {
+    (async () => {
+      const all = await chrome.storage.local.get(null);
+      const keys = Object.keys(all).filter((k) => k.startsWith('tb:'));
+      if (keys.length) await chrome.storage.local.remove(keys);
+      sendResponse({ ok: true, removed: keys.length });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'cacheStats') {
+    (async () => {
+      const all = await chrome.storage.local.get(null);
+      const keys = Object.keys(all).filter((k) => k.startsWith('tb:'));
+      sendResponse({ ok: true, count: keys.length });
+    })();
+    return true;
+  }
+});
