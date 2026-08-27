@@ -18,7 +18,8 @@
     showEnglish: true,
     fontSize: 26,
     bottomOffset: 72,
-    model: 'gemini-2.5-flash'
+    fontStack: '',            // خالی یعنی همان چیدمان پیش‌فرض overlay.css
+    model: 'gemini-3.5-flash-lite'
   };
 
   let S = Object.assign({}, DEFAULTS);
@@ -116,6 +117,7 @@
     const k = Math.max(0.65, Math.min(1.8, w / 900));
     st.ui.root.style.bottom = Math.round(S.bottomOffset * k) + 'px';
     st.ui.fa.style.fontSize = Math.round(S.fontSize * k) + 'px';
+    st.ui.fa.style.fontFamily = S.fontStack || '';
     st.ui.en.style.fontSize = Math.round(S.fontSize * 0.68 * k) + 'px';
     st.ui.en.style.display = S.showEnglish ? '' : 'none';
   }
@@ -404,11 +406,11 @@
     let restyle = false, retranslate = false, toggled = false;
     for (const k of Object.keys(changes)) {
       if (k === 'enabled') { S.enabled = changes[k].newValue; toggled = true; }
-      else if (k === 'showEnglish' || k === 'fontSize' || k === 'bottomOffset') {
+      else if (k === 'showEnglish' || k === 'fontSize' || k === 'bottomOffset' || k === 'fontStack') {
         S[k] = changes[k].newValue; restyle = true;
-      } else if (k === 'model' || k === 'apiKey') {
+      } else if (k === 'model' || k === 'apiKey' || k === 'keepTerms') {
         if (k === 'model') S.model = changes[k].newValue;
-        retranslate = true;
+        retranslate = true;   // ترجمه‌ی کش‌شده با تنظیم قبلی دیگر معتبر نیست
       }
     }
     if (toggled) { check(); return; }

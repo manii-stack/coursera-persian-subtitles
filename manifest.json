@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Coursera Persian Subtitles",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "زیرنویس فارسی زنده برای ویدیوهای Coursera با Google AI (Gemini).",
   "permissions": [
     "storage"

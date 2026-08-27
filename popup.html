@@ -77,6 +77,12 @@
     <input type="range" id="bottomOffset" min="10" max="200" step="2">
   </div>
 
+  <div class="row">
+    <label for="fontFamily">فونت زیرنویس</label>
+    <select id="fontFamily" style="width:170px"></select>
+  </div>
+  <p class="hint" id="fontHint"></p>
+
   <hr>
 
   <label for="apiKey">کلید Google AI</label>
@@ -90,6 +96,16 @@
     <label for="model">مدل</label>
     <select id="model" style="width:170px"></select>
   </div>
+
+  <div class="row">
+    <label for="keepTerms">اصطلاحات تخصصی ترجمه نشود</label>
+    <span class="sw"><input type="checkbox" id="keepTerms"><span></span></span>
+  </div>
+  <p class="hint">
+    روشن: واژه‌هایی مثل prompt و machine learning لاتین می‌مانند. خاموش: هرجا
+    معادل فارسی جاافتاده دارد فارسی می‌شود. با تغییر این کلید، ترجمه از نو
+    گرفته می‌شود (کش هر حالت جداست).
+  </p>
 
   <div class="btns">
     <button class="primary" id="save">ذخیره</button>

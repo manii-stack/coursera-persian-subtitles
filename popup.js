@@ -5,15 +5,50 @@ const DEFAULTS = {
   showEnglish: true,
   fontSize: 26,
   bottomOffset: 72,
-  model: 'gemini-2.5-flash',
+  fontStack: '',
+  keepTerms: true,
+  model: 'gemini-3.5-flash-lite',
   apiKey: ''
 };
 
 const FALLBACK_MODELS = [
+  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
   'gemini-2.0-flash'
 ];
+
+// دنباله‌ی مشترک هر انتخاب، تا اگر فونت نبود متن نشکند
+const FONT_TAIL = '"SF Pro Text", "Segoe UI", Tahoma, "Geeza Pro", sans-serif';
+
+const FONTS = [
+  { probe: null,        label: 'پیش‌فرض سیستم' },
+  { probe: 'Vazirmatn', label: 'Vazirmatn' },
+  { probe: 'IRANSans',  label: 'IRANSans' },
+  { probe: 'IRANYekan', label: 'IRANYekan' },
+  { probe: 'Shabnam',   label: 'Shabnam' },
+  { probe: 'Sahel',     label: 'Sahel' },
+  { probe: 'Estedad',   label: 'Estedad' },
+  { probe: 'B Nazanin', label: 'B Nazanin' },
+  { probe: 'Tahoma',    label: 'Tahoma' },
+  { probe: 'Geeza Pro', label: 'Geeza Pro' },
+  { probe: 'Segoe UI',  label: 'Segoe UI' }
+];
+
+const stackFor = (probe) => (probe ? '"' + probe + '", ' + FONT_TAIL : '');
+
+// آیا فونت روی این دستگاه نصب است؟ عرض متن را با سه فونت پایه می‌سنجیم؛
+// اگر با هیچ‌کدام فرق نکرد یعنی مرورگر به همان پایه برگشته، پس نصب نیست.
+function fontAvailable(name) {
+  const sample = 'آزمایش فونت Wgi ۱۲۳';
+  const ctx = document.createElement('canvas').getContext('2d');
+  return ['monospace', 'sans-serif', 'serif'].some((base) => {
+    ctx.font = '72px ' + base;
+    const w0 = ctx.measureText(sample).width;
+    ctx.font = '72px "' + name + '", ' + base;
+    return Math.abs(ctx.measureText(sample).width - w0) > 0.5;
+  });
+}
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
@@ -35,6 +70,28 @@ function fillModels(list, selected) {
   sel.value = selected || DEFAULTS.model;
 }
 
+function fillFonts(selectedStack) {
+  const sel = $('fontFamily');
+  sel.innerHTML = '';
+  let missing = 0;
+  for (const f of FONTS) {
+    const have = !f.probe || fontAvailable(f.probe);
+    if (!have) missing++;
+    const o = document.createElement('option');
+    o.value = stackFor(f.probe);
+    o.textContent = f.label + (have ? '' : ' (نصب نیست)');
+    o.disabled = !have;
+    if (f.probe) o.style.fontFamily = stackFor(f.probe);
+    sel.appendChild(o);
+  }
+  // اگر انتخاب ذخیره‌شده دیگر در دسترس نیست، به پیش‌فرض برگرد
+  sel.value = selectedStack || '';
+  if (sel.selectedIndex < 0 || sel.options[sel.selectedIndex].disabled) sel.value = '';
+  $('fontHint').textContent = missing
+    ? 'فونت‌های نصب‌نشده غیرفعال‌اند. Vazirmatn را می‌توانید از vazirmatn.com نصب کنید.'
+    : '';
+}
+
 async function load() {
   const got = await chrome.storage.local.get([...Object.keys(DEFAULTS), 'modelList']);
   const cfg = Object.assign({}, DEFAULTS, got);
@@ -43,6 +100,8 @@ async function load() {
   $('fontSize').value = cfg.fontSize;
   $('bottomOffset').value = cfg.bottomOffset;
   $('apiKey').value = cfg.apiKey || '';
+  $('keepTerms').checked = cfg.keepTerms !== false;
+  fillFonts(cfg.fontStack);
   fillModels(got.modelList, cfg.model);
 
   chrome.runtime.sendMessage({ type: 'cacheStats' }, (r) => {
@@ -51,7 +110,10 @@ async function load() {
 }
 
 // تغییرات فوری — بدون نیاز به دکمه‌ی ذخیره
-for (const id of ['enabled', 'showEnglish']) {
+$('fontFamily').addEventListener('change', () =>
+  chrome.storage.local.set({ fontStack: $('fontFamily').value }));
+
+for (const id of ['enabled', 'showEnglish', 'keepTerms']) {
   $(id).addEventListener('change', () => chrome.storage.local.set({ [id]: $(id).checked }));
 }
 for (const id of ['fontSize', 'bottomOffset']) {

@@ -12,32 +12,49 @@
  * ========================================================================= */
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 const BATCH_LINES = 40;        // هر درخواست چند خط زیرنویس
 const CONTEXT_LINES = 3;       // چند خط قبلی به‌عنوان زمینه (ترجمه نمی‌شود)
 const MAX_CACHE_ENTRIES = 600; // سقف تعداد دسته‌های کش‌شده
 
-const SYSTEM_PROMPT = [
-  'You translate English subtitle lines from online course videos into natural, fluent Persian (Farsi).',
-  '',
-  'Input: a JSON object with "context" (previous English lines, for continuity only) and "lines"',
-  '(a JSON array of English subtitle lines to translate, in order).',
-  'Output: a JSON array of Persian strings.',
-  '',
-  'Hard rules:',
-  '1. The output array MUST contain exactly one element per element of "lines", in the same order.',
-  '   Never merge, split, drop, reorder or add lines. Never translate the "context" lines.',
-  '2. Each line is a subtitle fragment and a sentence usually continues across several lines.',
-  '   Translate so the lines read correctly when played in sequence, but keep the fragment boundaries.',
-  '3. Use natural spoken Persian, not word-by-word translation. Use the ZWNJ correctly (می‌شود، می‌کنیم).',
-  '4. Technical and product terms: use the form Persian speakers actually use — either the standard',
-  '   Persian term (AI → هوش مصنوعی) or the Latin original when that is what people say',
-  '   (prompt → پرامپت، Google Workspace → Google Workspace، Gemini → Gemini).',
-  '5. Keep numbers, URLs, file names and code identifiers unchanged.',
-  '6. A line that is only a marker such as "[MUSIC]" or "- " becomes a short Persian equivalent',
-  '   (for example «[موسیقی]») or an empty string.',
-  '7. Plain text only: no numbering, no surrounding quotes, no notes, no explanations.'
-].join('\n');
+// دو گونه‌ی قاعده‌ی ۴ — کلید «اصطلاحات تخصصی» در popup بینشان جابه‌جا می‌کند.
+// هر گونه کلید کش جدا دارد، وگرنه عوض کردن کلید ترجمه‌ی قدیمی را برمی‌گرداند.
+const TERMS_RULE = {
+  keep: [
+    '4. Do NOT translate technical, product or brand terms. Keep them in their original Latin',
+    '   script inside the Persian sentence (for example: AI, prompt, model, dataset, API,',
+    '   machine learning, Google Workspace, Gemini). Inflect only the Persian around them so',
+    '   the sentence still reads as fluent, natural Persian.'
+  ],
+  adapt: [
+    '4. Technical and product terms: use the form Persian speakers actually use — either the',
+    '   standard Persian term (AI → هوش مصنوعی) or the Latin original when that is what people',
+    '   say (prompt → پرامپت، Google Workspace → Google Workspace، Gemini → Gemini).'
+  ]
+};
+
+function buildSystemPrompt(keepTerms) {
+  return [
+    'You translate English subtitle lines from online course videos into natural, fluent Persian (Farsi).',
+    '',
+    'Input: a JSON object with "context" (previous English lines, for continuity only) and "lines"',
+    '(a JSON array of English subtitle lines to translate, in order).',
+    'Output: a JSON array of Persian strings.',
+    '',
+    'Hard rules:',
+    '1. The output array MUST contain exactly one element per element of "lines", in the same order.',
+    '   Never merge, split, drop, reorder or add lines. Never translate the "context" lines.',
+    '2. Each line is a subtitle fragment and a sentence usually continues across several lines.',
+    '   Translate so the lines read correctly when played in sequence, but keep the fragment boundaries.',
+    '3. Fluency comes first. Write the Persian a person would actually say, not a word-by-word',
+    '   rendering of the English. Use the ZWNJ correctly (می‌شود، می‌کنیم).'
+  ].concat(keepTerms ? TERMS_RULE.keep : TERMS_RULE.adapt).concat([
+    '5. Keep numbers, URLs, file names and code identifiers unchanged.',
+    '6. A line that is only a marker such as "[MUSIC]" or "- " becomes a short Persian equivalent',
+    '   (for example «[موسیقی]») or an empty string.',
+    '7. Plain text only: no numbering, no surrounding quotes, no notes, no explanations.'
+  ]).join('\n');
+}
 
 /* ---------------------------------------------------------------- utils */
 
@@ -105,9 +122,9 @@ function describeError(status, data) {
   return 'خطای HTTP ' + status;
 }
 
-async function callGemini(apiKey, model, lines, context) {
+async function callGemini(apiKey, model, lines, context, keepTerms) {
   const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: buildSystemPrompt(keepTerms) }] },
     contents: [{
       role: 'user',
       parts: [{ text: JSON.stringify({ context, lines }) }]
@@ -159,8 +176,8 @@ function align(out, lines) {
   return fixed;
 }
 
-async function translateBatch(apiKey, model, lines, context) {
-  const key = 'tb:' + model + ':' + hash(JSON.stringify(lines));
+async function translateBatch(apiKey, model, lines, context, keepTerms) {
+  const key = 'tb:' + model + ':' + (keepTerms ? 'k1' : 'k0') + ':' + hash(JSON.stringify(lines));
   const hit = await cacheGet(key);
   if (hit && Array.isArray(hit.texts) && hit.texts.length === lines.length) {
     return { texts: hit.texts, cached: true };
@@ -169,10 +186,10 @@ async function translateBatch(apiKey, model, lines, context) {
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      let out = await callGemini(apiKey, model, lines, context);
+      let out = await callGemini(apiKey, model, lines, context, keepTerms);
       if (out.length !== lines.length && attempt === 0) {
         // یک بار دیگر با همان ورودی — معمولاً بار دوم تراز می‌شود
-        out = await callGemini(apiKey, model, lines, context);
+        out = await callGemini(apiKey, model, lines, context, keepTerms);
       }
       const texts = align(out, lines);
       await cacheSet(key, texts);
@@ -211,8 +228,9 @@ async function runJob(port, msg, isCancelled) {
   const lines = Array.isArray(msg.lines) ? msg.lines : [];
   if (!lines.length) { safePost(port, { type: 'done', total: 0 }); return; }
 
-  const cfg = await chrome.storage.local.get(['apiKey', 'model']);
+  const cfg = await chrome.storage.local.get(['apiKey', 'model', 'keepTerms']);
   const model = cfg.model || DEFAULT_MODEL;
+  const keepTerms = cfg.keepTerms !== false;
   if (!cfg.apiKey) {
     safePost(port, { type: 'error', code: 'nokey', message: 'کلید Google AI تنظیم نشده است.' });
     return;
@@ -235,7 +253,7 @@ async function runJob(port, msg, isCancelled) {
     if (isCancelled()) return;
     const context = lines.slice(Math.max(0, b.from - CONTEXT_LINES), b.from);
     try {
-      const { texts, cached } = await translateBatch(cfg.apiKey, model, b.lines, context);
+      const { texts, cached } = await translateBatch(cfg.apiKey, model, b.lines, context, keepTerms);
       if (isCancelled()) return;
       done++;
       if (!safePost(port, { type: 'batch', from: b.from, texts, done, total: batches.length, cached })) return;
@@ -283,14 +301,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'testKey') {
     (async () => {
-      const cfg = await chrome.storage.local.get(['apiKey', 'model']);
+      const cfg = await chrome.storage.local.get(['apiKey', 'model', 'keepTerms']);
       if (!cfg.apiKey) return sendResponse({ ok: false, error: 'ابتدا کلید API را ذخیره کنید.' });
       try {
         const out = await callGemini(
           cfg.apiKey,
           cfg.model || DEFAULT_MODEL,
           ['Hello and welcome to this course.'],
-          []
+          [],
+          cfg.keepTerms !== false
         );
         sendResponse({ ok: true, sample: out[0] || '' });
       } catch (e) {
