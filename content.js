@@ -1,34 +1,90 @@
 'use strict';
 
 /* =========================================================================
- * Coursera Persian Subtitles — content script
+ * Live Persian subtitles — content script
  *
- * Text source: Coursera's own English caption track on the <video> element
- * (video.textTracks). With mode='hidden' the cues load with their exact timings
- * without the browser drawing them; we draw them over the video ourselves.
+ * The script decides for itself which site it is running on, picks the cue
+ * source that site needs, and applies that site's own appearance settings.
+ *
+ *   SITES   — one entry per supported site: how to recognise it, which cue
+ *             source it uses, and the appearance defaults that suit its player
+ *   SOURCES — how to obtain cues. 'texttracks' reads the site's own caption
+ *             track from video.textTracks; keeping the track in mode='hidden'
+ *             loads the cues with exact timings without the browser drawing
+ *             them, so we can draw them ourselves.
+ *
+ * Everything below the source layer — overlay, sync, batching, cache — is
+ * shared by every site.
  * ========================================================================= */
 
 (() => {
-  if (window.__courseraFaSubLoaded) return;
-  window.__courseraFaSubLoaded = true;
+  if (window.__faSubLoaded) return;
+  window.__faSubLoaded = true;
 
-  const TAG = '[coursera-fa]';
-  const DEFAULTS = {
-    enabled: true,
+  const TAG = '[fa-sub]';
+
+  /* --------------------------------------------------------------- sites */
+
+  const SITES = [
+    {
+      id: 'coursera',
+      label: 'Coursera',
+      source: 'texttracks',
+      match: (h) => /(^|\.)coursera\.org$/i.test(h),
+      defaults: { bottomOffset: 72 }
+    },
+    {
+      id: 'vimeo',
+      label: 'Vimeo',
+      source: 'texttracks',
+      match: (h) => /(^|\.)vimeo\.com$/i.test(h),
+      defaults: { bottomOffset: 64 }
+    }
+  ];
+
+  const SITE = SITES.find((s) => s.match(location.hostname));
+  if (!SITE) return;
+
+  /* ------------------------------------------------------------ settings */
+
+  // Global: the same everywhere. Appearance: per site, because players differ.
+  const GLOBAL_DEFAULTS = { enabled: true };
+  const APPEARANCE_DEFAULTS = {
     showEnglish: true,
     fontSize: 26,
     bottomOffset: 72,
-    fontStack: '',            // empty means the default stack from overlay.css
-    model: 'gemini-3.5-flash-lite'
+    fontStack: ''
   };
+  const APPEARANCE_KEYS = Object.keys(APPEARANCE_DEFAULTS);
+  const SITE_KEY = 'site:' + SITE.id;
 
-  let S = Object.assign({}, DEFAULTS);
-  let st = null;          // state of the current attachment to one video
-  let watchdog = null;
+  let S = Object.assign({}, GLOBAL_DEFAULTS, APPEARANCE_DEFAULTS, SITE.defaults);
+
+  function applySettings(got) {
+    const legacy = {};   // v1.x stored appearance at the top level
+    for (const k of APPEARANCE_KEYS) {
+      if (got[k] !== undefined) legacy[k] = got[k];
+    }
+    Object.assign(
+      S,
+      GLOBAL_DEFAULTS,
+      APPEARANCE_DEFAULTS,
+      SITE.defaults,
+      legacy,
+      got[SITE_KEY] || {}
+    );
+    if (got.enabled !== undefined) S.enabled = got.enabled;
+  }
+
+  function loadSettings() {
+    return chrome.storage.local
+      .get(['enabled'].concat(APPEARANCE_KEYS, [SITE_KEY]))
+      .then(applySettings);
+  }
 
   /* ------------------------------------------------------------- helpers */
 
-  const log = (...a) => console.debug(TAG, ...a);
+  const log = (...a) => console.debug(TAG, SITE.id, ...a);
 
   // Clean VTT text: strip tags and decode entities
   const DECODER = document.createElement('textarea');
@@ -55,32 +111,138 @@
     return -1;
   }
 
+  const areaOf = (v) => {
+    const r = v.getBoundingClientRect();
+    return r.width * r.height;
+  };
+
+  // A page can hold several <video> elements and the biggest one is not
+  // necessarily the one carrying the captions: Vimeo lays the real player out
+  // lazily while a small preview player — with no caption track at all — is
+  // already on screen. So a video that carries a usable track wins regardless
+  // of its size, and area only breaks ties.
   function pickVideo() {
     const vs = Array.prototype.slice.call(document.querySelectorAll('video'));
+    if (!vs.length) return null;
+
+    const carriers = vs.filter((v) => source.candidate(v));
+    if (carriers.length) {
+      return carriers.sort((a, b) => areaOf(b) - areaOf(a))[0];
+    }
+
     let best = null, bestArea = 0;
     for (const v of vs) {
-      const r = v.getBoundingClientRect();
-      const area = r.width * r.height;
-      if (area > bestArea) { best = v; bestArea = area; }
+      const a = areaOf(v);
+      if (a > bestArea) { best = v; bestArea = a; }
     }
     return bestArea > 10000 ? best : null;
   }
 
-  function pickEnglishTrack(video) {
-    const tracks = Array.prototype.slice.call(video.textTracks || []);
-    const en = tracks.filter((t) =>
-      /^en/i.test(t.language || '') &&
-      (t.kind === 'captions' || t.kind === 'subtitles')
-    );
-    if (!en.length) return null;
-    // prefer a track that already carries cues
-    return en.find((t) => t.cues && t.cues.length) || en[0];
-  }
+  /* ------------------------------------------------------- cue sources */
+
+  const SOURCES = {
+    /* The site exposes its captions on video.textTracks (Coursera, Vimeo). */
+    texttracks: {
+      pick(video) {
+        const tracks = Array.prototype.slice.call(video.textTracks || []);
+        // 'en-x-autogen' (Vimeo auto-captions) must match too
+        const en = tracks.filter((t) =>
+          /^en/i.test(t.language || '') &&
+          (t.kind === 'captions' || t.kind === 'subtitles')
+        );
+        if (!en.length) return null;
+        return en.find((t) => t.cues && t.cues.length) || en[0];
+      },
+
+      // Does this element already carry a track we could use?
+      candidate(video) {
+        return !!SOURCES.texttracks.pick(video);
+      },
+
+      acquire(video, token, alive) {
+        return new Promise((resolve) => {
+          const t0 = Date.now();
+          const tick = () => {
+            if (!alive(token)) return resolve(null);
+            const track = SOURCES.texttracks.pick(video);
+            if (track) {
+              const handle = { track, savedMode: track.mode };
+              // 'showing' means the site is drawing captions itself — avoid doubling them
+              if (track.mode !== 'hidden') track.mode = 'hidden';
+              return resolve(handle);
+            }
+            if (Date.now() - t0 > 20000) return resolve(null);
+            setTimeout(tick, 400);
+          };
+          tick();
+        });
+      },
+
+      cues(handle, token, alive) {
+        return new Promise((resolve) => {
+          const t0 = Date.now();
+          const tick = () => {
+            if (!alive(token)) return resolve(null);
+            const raw = handle.track.cues;
+            if (raw && raw.length) {
+              const out = [];
+              for (let i = 0; i < raw.length; i++) {
+                const c = raw[i];
+                // Zero-length cues (Vimeo auto-captions produce a few) can never
+                // satisfy s <= t < e, so they would be translated but never shown.
+                if (!(c.endTime > c.startTime)) continue;
+                const en = cleanCue(c.text);
+                out.push({ s: c.startTime, e: c.endTime, en, flat: flat(en) });
+              }
+              out.sort((a, b) => a.s - b.s);
+              return resolve(out);
+            }
+            if (Date.now() - t0 > 20000) return resolve(null);
+            setTimeout(tick, 250);
+          };
+          tick();
+        });
+      },
+
+      // Coursera and Vimeo both flip the track back to disabled once the media
+      // loads, which empties track.cues. Hold it at hidden.
+      hold(handle) {
+        if (handle && handle.track && handle.track.mode !== 'hidden') {
+          handle.track.mode = 'hidden';
+        }
+      },
+
+      ready(handle) {
+        return !!(handle && handle.track && handle.track.cues && handle.track.cues.length);
+      },
+
+      watch(handle, video, offs) {
+        const keep = () => SOURCES.texttracks.hold(handle);
+        try {
+          video.textTracks.addEventListener('change', keep);
+          offs.push(() => video.textTracks.removeEventListener('change', keep));
+        } catch (e) {}
+      },
+
+      release(handle) {
+        try {
+          if (handle && handle.track && handle.savedMode &&
+              handle.track.mode !== handle.savedMode) {
+            handle.track.mode = handle.savedMode;
+          }
+        } catch (e) {}
+      }
+    }
+  };
+
+  const source = SOURCES[SITE.source];
 
   /* ------------------------------------------------------------- overlay */
 
+  let st = null;
+
   function buildOverlay(video) {
-    let host = video.parentElement;
+    const host = video.parentElement;
     if (!host) return null;
     if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
 
@@ -113,7 +275,7 @@
 
   function applyStyle() {
     if (!st || !st.ui) return;
-    const w = st.video.getBoundingClientRect().width || 900;
+    const w = st.video.getBoundingClientRect().width || 900;   // 0 while the player is still laid out
     const k = Math.max(0.65, Math.min(1.8, w / 900));
     st.ui.root.style.bottom = Math.round(S.bottomOffset * k) + 'px';
     st.ui.fa.style.fontSize = Math.round(S.fontSize * k) + 'px';
@@ -144,7 +306,7 @@
     c.style.display = '';
   }
 
-  /* ------------------------------------------------------------- render */
+  /* -------------------------------------------------------------- render */
 
   function render() {
     if (!st || !st.ui || !st.cues.length) return;
@@ -160,24 +322,25 @@
     }
 
     const cue = st.cues[i];
-    const fa = st.fa[i];
+    const faText = st.fa[i];
     st.ui.box.style.visibility = 'visible';
-    st.ui.fa.textContent = fa || '';
-    st.ui.fa.style.opacity = fa ? '1' : '0';
+    st.ui.fa.textContent = faText || '';
+    st.ui.fa.style.opacity = faText ? '1' : '0';
     // until the translation arrives, keep the English so the area is not blank
-    st.ui.en.textContent = (S.showEnglish || !fa) ? cue.en : '';
-    st.ui.en.style.display = (S.showEnglish || !fa) ? '' : 'none';
+    st.ui.en.textContent = (S.showEnglish || !faText) ? cue.en : '';
+    st.ui.en.style.display = (S.showEnglish || !faText) ? '' : 'none';
   }
 
-  /* -------------------------------------------------------- translation */
+  /* --------------------------------------------------------- translation */
+
+  const FA_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
+  const faNum = (n) => String(n).replace(/\d/g, (d) => FA_DIGITS[+d]);
 
   function requestTranslation() {
     if (!st || !st.cues.length) return;
     if (st.port) { try { st.port.disconnect(); } catch (e) {} st.port = null; }
 
     const firstMissing = st.fa.findIndex((x, i) => !x && st.cues[i].flat);
-    const curIdx = Math.max(0, cueIndexAt(st.cues, st.video.currentTime));
-    const startIndex = firstMissing === -1 ? curIdx : Math.max(firstMissing, 0);
     if (firstMissing === -1) { setChip('', null); return; }
 
     let port;
@@ -188,12 +351,12 @@
       return;
     }
     st.port = port;
-    const myVideoToken = st.token;
+    const myToken = st.token;
 
     setChip('در حال ترجمه…', null);
 
     port.onMessage.addListener((m) => {
-      if (!st || st.token !== myVideoToken) return;
+      if (!st || st.token !== myToken) return;
       if (m.type === 'start') {
         st.totalBatches = m.total;
         setChip('در حال ترجمه… ۰/' + faNum(m.total), null);
@@ -219,39 +382,33 @@
     });
 
     port.onDisconnect.addListener(() => {
-      if (!st || st.token !== myVideoToken) return;
-      if (st.port !== port) return;
+      if (!st || st.token !== myToken || st.port !== port) return;
       st.port = null;
       // the service worker went to sleep; resume from the first untranslated batch
       const stillMissing = st.fa.some((x, i) => !x && st.cues[i].flat);
       if (stillMissing && st.reconnects < 5) {
         st.reconnects++;
-        setTimeout(() => { if (st && st.token === myVideoToken) requestTranslation(); }, 1200);
+        setTimeout(() => { if (st && st.token === myToken) requestTranslation(); }, 1200);
       }
     });
 
     port.postMessage({
       type: 'translate',
-      startIndex,
+      startIndex: firstMissing,
       lines: st.cues.map((c) => c.flat)
     });
   }
 
-  // Persian digits for display
-  const FA_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
-  const faNum = (n) => String(n).replace(/\d/g, (d) => FA_DIGITS[+d]);
-
   /* --------------------------------------------------------- attach flow */
 
   let tokenSeq = 0;
+  const alive = (token) => !!st && st.token === token;
 
   function detach() {
     if (!st) return;
     try { if (st.port) st.port.disconnect(); } catch (e) {}
     try { if (st.ui && st.ui.root.parentElement) st.ui.root.remove(); } catch (e) {}
-    try {
-      if (st.track && st.savedMode && st.track.mode !== st.savedMode) st.track.mode = st.savedMode;
-    } catch (e) {}
+    source.release(st.handle);
     for (const off of st.offs) { try { off(); } catch (e) {} }
     st = null;
   }
@@ -261,7 +418,7 @@
     detach();
     const token = ++tokenSeq;
     st = {
-      token, video, ui: null, track: null, savedMode: null,
+      token, video, ui: null, handle: null,
       cues: [], fa: [], lastIndex: -1, offs: [], port: null,
       totalBatches: 0, reconnects: 0, retries: retries || 0,
       srcKey: video.currentSrc || '', path: location.pathname
@@ -272,20 +429,16 @@
     applyStyle();
     st.ui.box.style.visibility = 'hidden';
 
-    const track = await waitForTrack(video, token);
-    if (!st || st.token !== token) return;
-    if (!track) {
+    const handle = await source.acquire(video, token, alive);
+    if (!alive(token)) return;
+    if (!handle) {
       setChip('این ویدیو زیرنویس انگلیسی ندارد', 'warn');
       return;
     }
+    st.handle = handle;
 
-    st.track = track;
-    st.savedMode = track.mode;
-    // 'showing' means Coursera is drawing the captions itself — avoid doubling them
-    if (track.mode !== 'hidden') track.mode = 'hidden';
-
-    const cues = await waitForCues(track, token);
-    if (!st || st.token !== token) return;
+    const cues = await source.cues(handle, token, alive);
+    if (!alive(token)) return;
     if (!cues || !cues.length) {
       setChip('زیرنویس این ویدیو بارگذاری نشد', 'warn');
       return;
@@ -294,7 +447,7 @@
     st.cues = cues;
     st.fa = new Array(cues.length).fill('');
     st.lastIndex = -1;
-    log('cues', cues.length, 'path', location.pathname);
+    log('cues', cues.length, location.pathname);
 
     const onTime = () => render();
     video.addEventListener('timeupdate', onTime);
@@ -304,61 +457,14 @@
       video.removeEventListener('seeked', onTime);
     });
 
-    try {
-      track.addEventListener('cuechange', onTime);
-      st.offs.push(() => track.removeEventListener('cuechange', onTime));
-    } catch (e) {}
+    source.watch(handle, video, st.offs);
 
     const ro = new ResizeObserver(() => applyStyle());
     ro.observe(video);
     st.offs.push(() => ro.disconnect());
 
-    // the Coursera player sometimes flips the track back to disabled, emptying cues
-    const keepHidden = () => { if (st && st.track && st.track.mode !== 'hidden') st.track.mode = 'hidden'; };
-    try {
-      video.textTracks.addEventListener('change', keepHidden);
-      st.offs.push(() => video.textTracks.removeEventListener('change', keepHidden));
-    } catch (e) {}
-
     render();
     if (S.enabled) requestTranslation();
-  }
-
-  function waitForTrack(video, token) {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
-      const tick = () => {
-        if (!st || st.token !== token) return resolve(null);
-        const tr = pickEnglishTrack(video);
-        if (tr) return resolve(tr);
-        if (Date.now() - t0 > 20000) return resolve(null);
-        setTimeout(tick, 400);
-      };
-      tick();
-    });
-  }
-
-  function waitForCues(track, token) {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
-      const tick = () => {
-        if (!st || st.token !== token) return resolve(null);
-        const raw = track.cues;
-        if (raw && raw.length) {
-          const out = [];
-          for (let i = 0; i < raw.length; i++) {
-            const c = raw[i];
-            const en = cleanCue(c.text);
-            out.push({ s: c.startTime, e: c.endTime, en, flat: flat(en) });
-          }
-          out.sort((a, b) => a.s - b.s);
-          return resolve(out);
-        }
-        if (Date.now() - t0 > 20000) return resolve(null);
-        setTimeout(tick, 250);
-      };
-      tick();
-    });
   }
 
   /* ------------------------------------------------------------ watchdog */
@@ -373,6 +479,7 @@
       if (st) detach();
       return;
     }
+
     const src = v.currentSrc || '';
     if (st && st.video === v && !st.srcKey && src) st.srcKey = src;   // src filled in late, not a new video
 
@@ -380,47 +487,51 @@
         (st.srcKey && src && st.srcKey !== src)) {
       attach(v);
     } else if (st.ui && !st.ui.root.isConnected) {
-      // React threw the overlay away — rebuild it
+      // the page threw the overlay away — rebuild it
       attach(v);
     } else {
-      if (st.track && st.track.mode !== 'hidden') st.track.mode = 'hidden';
+      source.hold(st.handle);
       // if the cues never arrived (the track was disabled mid-flight), try again
-      if (st.track && !st.cues.length && st.retries < 3 && st.track.cues && st.track.cues.length) {
+      if (st.handle && !st.cues.length && st.retries < 3 && source.ready(st.handle)) {
         attach(v, st.retries + 1);
       }
     }
   }
 
-  /* ------------------------------------------------------------ settings */
-
-  function loadSettings() {
-    return chrome.storage.local.get(Object.keys(DEFAULTS)).then((got) => {
-      for (const k of Object.keys(DEFAULTS)) {
-        S[k] = (got[k] === undefined) ? DEFAULTS[k] : got[k];
-      }
-    });
-  }
+  /* ------------------------------------------------------------- wiring */
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     let restyle = false, retranslate = false, toggled = false;
+
     for (const k of Object.keys(changes)) {
       if (k === 'enabled') { S.enabled = changes[k].newValue; toggled = true; }
-      else if (k === 'showEnglish' || k === 'fontSize' || k === 'bottomOffset' || k === 'fontStack') {
-        S[k] = changes[k].newValue; restyle = true;
-      } else if (k === 'model' || k === 'apiKey' || k === 'keepTerms') {
-        if (k === 'model') S.model = changes[k].newValue;
+      else if (k === SITE_KEY || APPEARANCE_KEYS.indexOf(k) !== -1) restyle = true;
+      else if (k === 'model' || k === 'apiKey' || k === 'keepTerms') {
         retranslate = true;   // translation cached under the previous setting no longer applies
       }
     }
-    if (toggled) { check(); return; }
-    if (restyle && st) { applyStyle(); st.lastIndex = -2; render(); }
-    if (retranslate && st && st.cues.length) {
-      st.fa = new Array(st.cues.length).fill('');
-      st.reconnects = 0;
-      st.lastIndex = -2;
-      render();
-      requestTranslation();
+
+    if (!restyle && !retranslate && !toggled) return;
+
+    loadSettings().then(() => {
+      if (toggled) { check(); return; }
+      if (restyle && st) { applyStyle(); st.lastIndex = -2; render(); }
+      if (retranslate && st && st.cues.length) {
+        st.fa = new Array(st.cues.length).fill('');
+        st.reconnects = 0;
+        st.lastIndex = -2;
+        render();
+        requestTranslation();
+      }
+    });
+  });
+
+  // The popup asks the active tab which site it is on, so it can edit that
+  // site's appearance settings.
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.type === 'whichSite') {
+      sendResponse({ id: SITE.id, label: SITE.label, attached: !!(st && st.cues.length) });
     }
   });
 
@@ -429,6 +540,6 @@
 
   loadSettings().then(() => {
     check();
-    watchdog = setInterval(check, 1000);
+    setInterval(check, 1000);
   });
 })();

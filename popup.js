@@ -1,15 +1,33 @@
 'use strict';
 
-const DEFAULTS = {
+/* Settings panel.
+ *
+ * Global settings (key, model, terms switch, master on/off) apply everywhere.
+ * Appearance settings are stored per site under "site:<id>", because the
+ * players differ — the control bar of one site sits higher than another's.
+ * The active tab is asked which site it is on, so the panel edits that site.
+ */
+
+const GLOBAL_DEFAULTS = {
   enabled: true,
-  showEnglish: true,
-  fontSize: 26,
-  bottomOffset: 72,
-  fontStack: '',
   keepTerms: true,
   model: 'gemini-3.5-flash-lite',
   apiKey: ''
 };
+
+// Mirrors the SITES table in content.js
+const SITE_DEFAULTS = {
+  coursera: { bottomOffset: 72 },
+  vimeo: { bottomOffset: 64 }
+};
+
+const APPEARANCE_DEFAULTS = {
+  showEnglish: true,
+  fontSize: 26,
+  bottomOffset: 72,
+  fontStack: ''
+};
+const APPEARANCE_KEYS = Object.keys(APPEARANCE_DEFAULTS);
 
 const FALLBACK_MODELS = [
   'gemini-3.5-flash-lite',
@@ -37,8 +55,18 @@ const FONTS = [
 
 const stackFor = (probe) => (probe ? '"' + probe + '", ' + FONT_TAIL : '');
 
-// Is the font installed on this machine? Measure the text width against three base
-// fonts; if it never differs, the browser fell back to the base, so the font is absent.
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+
+let siteId = null;   // null means the active tab is not a supported site
+
+function setStatus(text, cls) {
+  statusEl.textContent = text || '';
+  statusEl.className = cls || '';
+}
+
+// Is the font installed on this machine? Measure the text width against three
+// base fonts; if it never differs, the browser fell back, so the font is absent.
 function fontAvailable(name) {
   const sample = 'آزمایش فونت Wgi ۱۲۳';
   const ctx = document.createElement('canvas').getContext('2d');
@@ -48,26 +76,6 @@ function fontAvailable(name) {
     ctx.font = '72px "' + name + '", ' + base;
     return Math.abs(ctx.measureText(sample).width - w0) > 0.5;
   });
-}
-
-const $ = (id) => document.getElementById(id);
-const statusEl = $('status');
-
-function setStatus(text, cls) {
-  statusEl.textContent = text || '';
-  statusEl.className = cls || '';
-}
-
-function fillModels(list, selected) {
-  const sel = $('model');
-  const models = Array.from(new Set([...(list || []), ...FALLBACK_MODELS, selected].filter(Boolean)));
-  sel.innerHTML = '';
-  for (const m of models) {
-    const o = document.createElement('option');
-    o.value = m; o.textContent = m;
-    sel.appendChild(o);
-  }
-  sel.value = selected || DEFAULTS.model;
 }
 
 function fillFonts(selectedStack) {
@@ -92,33 +100,120 @@ function fillFonts(selectedStack) {
     : '';
 }
 
+function fillModels(list, selected) {
+  const sel = $('model');
+  const models = Array.from(new Set([...(list || []), ...FALLBACK_MODELS, selected].filter(Boolean)));
+  sel.innerHTML = '';
+  for (const m of models) {
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m;
+    sel.appendChild(o);
+  }
+  sel.value = selected || GLOBAL_DEFAULTS.model;
+}
+
+/* ------------------------------------------------------- site detection */
+
+function detectSite() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab) return resolve(null);
+      try {
+        chrome.tabs.sendMessage(tab.id, { type: 'whichSite' }, (res) => {
+          void chrome.runtime.lastError;   // no content script on this page
+          resolve(res && res.id ? res : null);
+        });
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/* ------------------------------------------------------------- settings */
+
+// Same merge order as content.js, so panel and page always agree
+function effectiveAppearance(stored) {
+  const legacy = {};
+  for (const k of APPEARANCE_KEYS) {
+    if (stored[k] !== undefined) legacy[k] = stored[k];
+  }
+  return Object.assign(
+    {},
+    APPEARANCE_DEFAULTS,
+    (siteId && SITE_DEFAULTS[siteId]) || {},
+    legacy,
+    (siteId && stored['site:' + siteId]) || {}
+  );
+}
+
+async function saveAppearance(key, value) {
+  if (!siteId) return;
+  const k = 'site:' + siteId;
+  const got = await chrome.storage.local.get(k);
+  const next = Object.assign({}, got[k] || {}, { [key]: value });
+  await chrome.storage.local.set({ [k]: next });
+}
+
 async function load() {
-  const got = await chrome.storage.local.get([...Object.keys(DEFAULTS), 'modelList']);
-  const cfg = Object.assign({}, DEFAULTS, got);
-  $('enabled').checked = !!cfg.enabled;
-  $('showEnglish').checked = !!cfg.showEnglish;
-  $('fontSize').value = cfg.fontSize;
-  $('bottomOffset').value = cfg.bottomOffset;
-  $('apiKey').value = cfg.apiKey || '';
-  $('keepTerms').checked = cfg.keepTerms !== false;
-  fillFonts(cfg.fontStack);
-  fillModels(got.modelList, cfg.model);
+  const site = await detectSite();
+  siteId = site && site.id;
+
+  const line = $('siteLine');
+  if (siteId) {
+    line.className = 'siteline';
+    line.innerHTML = 'سایت این تب: <b></b> — تنظیمات ظاهری فقط برای همین سایت ذخیره می‌شود.';
+    line.querySelector('b').textContent = site.label;
+  } else {
+    line.className = 'siteline off';
+    line.innerHTML = '<b>این صفحه پشتیبانی نمی‌شود.</b> فعلاً Coursera و Vimeo. تنظیمات ترجمه را همین‌جا می‌توانید عوض کنید.';
+    $('appearance').classList.add('dim');
+  }
+
+  const stored = await chrome.storage.local.get(null);
+  const g = Object.assign({}, GLOBAL_DEFAULTS, {
+    enabled: stored.enabled,
+    keepTerms: stored.keepTerms,
+    model: stored.model,
+    apiKey: stored.apiKey
+  });
+  const a = effectiveAppearance(stored);
+
+  $('enabled').checked = g.enabled !== false;
+  $('keepTerms').checked = g.keepTerms !== false;
+  $('apiKey').value = g.apiKey || '';
+  $('showEnglish').checked = a.showEnglish !== false;
+  $('fontSize').value = a.fontSize;
+  $('bottomOffset').value = a.bottomOffset;
+  fillFonts(a.fontStack);
+  fillModels(stored.modelList, g.model || GLOBAL_DEFAULTS.model);
 
   chrome.runtime.sendMessage({ type: 'cacheStats' }, (r) => {
+    void chrome.runtime.lastError;
     if (r && r.ok) $('cacheInfo').textContent = 'کش ترجمه: ' + r.count + ' دسته';
   });
 }
 
-// Instant changes — no save button needed
-$('fontFamily').addEventListener('change', () =>
-  chrome.storage.local.set({ fontStack: $('fontFamily').value }));
+/* -------------------------------------------------------------- wiring */
 
-for (const id of ['enabled', 'showEnglish', 'keepTerms']) {
-  $(id).addEventListener('change', () => chrome.storage.local.set({ [id]: $(id).checked }));
-}
-for (const id of ['fontSize', 'bottomOffset']) {
-  $(id).addEventListener('input', () => chrome.storage.local.set({ [id]: Number($(id).value) }));
-}
+// Instant changes — no save button needed
+$('enabled').addEventListener('change', () =>
+  chrome.storage.local.set({ enabled: $('enabled').checked }));
+$('keepTerms').addEventListener('change', () =>
+  chrome.storage.local.set({ keepTerms: $('keepTerms').checked }));
+
+$('showEnglish').addEventListener('change', () =>
+  saveAppearance('showEnglish', $('showEnglish').checked));
+$('fontSize').addEventListener('input', () =>
+  saveAppearance('fontSize', Number($('fontSize').value)));
+$('bottomOffset').addEventListener('input', () =>
+  saveAppearance('bottomOffset', Number($('bottomOffset').value)));
+$('fontFamily').addEventListener('change', () =>
+  saveAppearance('fontStack', $('fontFamily').value));
+
+$('model').addEventListener('change', () =>
+  chrome.storage.local.set({ model: $('model').value }));
 
 $('save').addEventListener('click', async () => {
   await chrome.storage.local.set({
@@ -127,8 +222,6 @@ $('save').addEventListener('click', async () => {
   });
   setStatus('ذخیره شد.', 'ok');
 });
-
-$('model').addEventListener('change', () => chrome.storage.local.set({ model: $('model').value }));
 
 $('test').addEventListener('click', async () => {
   await chrome.storage.local.set({ apiKey: $('apiKey').value.trim(), model: $('model').value });

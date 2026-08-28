@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
-<title>زیرنویس فارسی Coursera</title>
+<title>زیرنویس فارسی زنده</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -31,6 +31,13 @@
   .btns { display: flex; gap: 8px; margin-top: 8px; }
   hr { border: 0; border-top: 1px solid #e6e8ec; margin: 14px 0; }
   #status { min-height: 16px; font-size: 11.5px; line-height: 1.7; margin-top: 8px; }
+  .siteline {
+    font-size: 11.5px; line-height: 1.7; margin: -6px 0 10px;
+    color: #6a7180; padding-bottom: 10px; border-bottom: 1px solid #e6e8ec;
+  }
+  .siteline b { color: #0056d2; }
+  .siteline.off b { color: #b42318; }
+  .dim { opacity: .45; pointer-events: none; }
   .ok { color: #1a7f37; } .err { color: #b42318; }
   a { color: #0056d2; }
   .sw { position: relative; width: 40px; height: 22px; flex: none; }
@@ -47,6 +54,7 @@
   .sw input:checked + span::after { transform: translateX(-18px); }
   @media (prefers-color-scheme: dark) {
     body { background: #1e2027; color: #e7e9ee; }
+    .siteline { color: #9aa1b1; border-bottom-color: #333744; }
     input, select { background: #2a2d36; border-color: #3a3e49; }
     button { background: #2a2d36; border-color: #3a3e49; }
     .hint { color: #9aa1b1; }
@@ -55,13 +63,15 @@
 </style>
 </head>
 <body>
-  <h1>زیرنویس فارسی Coursera</h1>
+  <h1>زیرنویس فارسی زنده</h1>
+  <div id="siteLine" class="siteline">…</div>
 
   <div class="row">
     <label for="enabled">فعال</label>
     <span class="sw"><input type="checkbox" id="enabled"><span></span></span>
   </div>
 
+  <div id="appearance">
   <div class="row">
     <label for="showEnglish">نمایش متن انگلیسی زیر فارسی</label>
     <span class="sw"><input type="checkbox" id="showEnglish"><span></span></span>
@@ -82,6 +92,7 @@
     <select id="fontFamily" style="width:170px"></select>
   </div>
   <p class="hint" id="fontHint"></p>
+  </div>
 
   <hr>
 
